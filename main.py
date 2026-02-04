@@ -9,314 +9,173 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-# Configure logging
+# ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Rate limiter
+# ---------------- RATE LIMIT ----------------
 limiter = Limiter(key_func=get_remote_address)
 
-# Create FastAPI app
+# ---------------- APP ----------------
 app = FastAPI(
     title=APP_NAME,
-    description="Secure API to access Rajya Sabha members data with authentication",
-    version=APP_VERSION,
-    docs_url="/docs",
-    redoc_url="/redoc"
+    description="Rajya Sabha Public Data API",
+    version=APP_VERSION
 )
 
-# Add rate limiter to app
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Enable CORS
+# ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Public endpoints - No authentication required
+# ---------------- PUBLIC ----------------
 @app.get("/")
 def home():
-    """Welcome page - Public access"""
     return {
         "message": f"Welcome to {APP_NAME}",
         "version": APP_VERSION,
-        "status": "online",
-        "authentication": "Required for all data endpoints",
-        "documentation": {
-            "swagger": "/docs",
-            "redoc": "/redoc"
-        },
-        "note": "Include 'X-API-Key' header in all requests"
+        "docs": "/docs"
     }
 
 @app.get("/health")
-def health_check():
-    """Check if API and database are working - Public access"""
+def health():
     conn = get_database_connection()
     if conn:
         close_connection(conn)
-        return {"status": "healthy", "database": "connected"}
-    else:
-        return {"status": "unhealthy", "database": "disconnected"}
+        return {"status": "healthy"}
+    return {"status": "unhealthy"}
 
-# Protected endpoints - Require API key
+# =====================================================
+# MEMBERS
+# =====================================================
 @app.get("/members")
 @limiter.limit("100/minute")
-def get_all_members(
+def members(
     request: Request,
-    page: int = Query(1, ge=1, description="Page number"),
-    limit: int = Query(50, ge=1, le=500, description="Items per page"),
+    page: int = 1,
+    limit: int = 50,
     api_key: str = Depends(verify_api_key)
 ):
-    """
-    Get all Rajya Sabha members with pagination
-    
-    **Authentication Required**: Include X-API-Key header
-    **Rate Limit**: 100 requests per minute
-    """
-    
-    logger.info(f"GET /members - page={page}, limit={limit}")
-    
     conn = get_database_connection()
-    if not conn:
-        logger.error("Database connection failed")
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
-    try:
-        cursor = conn.cursor(dictionary=True)
-        
-        # Get total count
-        cursor.execute("SELECT COUNT(*) as total FROM members")
-        total_count = cursor.fetchone()['total']
-        
-        # Get paginated data
-        offset = (page - 1) * limit
-        query = "SELECT * FROM members ORDER BY srno LIMIT %s OFFSET %s"
-        cursor.execute(query, (limit, offset))
-        data = cursor.fetchall()
-        
-        cursor.close()
-        close_connection(conn)
-        
-        logger.info(f"Returned {len(data)} members")
-        
-        return {
-            "total": total_count,
-            "page": page,
-            "limit": limit,
-            "total_pages": (total_count + limit - 1) // limit,
-            "data": data
-        }
-    
-    except Exception as e:
-        logger.error(f"Error in get_all_members: {str(e)}")
-        close_connection(conn)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("SELECT COUNT(*) total FROM members")
+    total = cursor.fetchone()["total"]
+
+    offset = (page - 1) * limit
+    cursor.execute(
+        "SELECT * FROM members ORDER BY srno LIMIT %s OFFSET %s",
+        (limit, offset)
+    )
+    data = cursor.fetchall()
+
+    cursor.close()
+    close_connection(conn)
+
+    return {"total": total, "page": page, "data": data}
 
 @app.get("/members/{srno}")
 @limiter.limit("100/minute")
-def get_member_by_srno(
-    request: Request,
-    srno: int,
-    api_key: str = Depends(verify_api_key)
-):
-    """
-    Get a specific member by SRNO
-    
-    **Authentication Required**: Include X-API-Key header
-    """
-    
-    logger.info(f"GET /members/{srno}")
-    
+def member(srno: int, request: Request, api_key: str = Depends(verify_api_key)):
     conn = get_database_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
-    try:
-        cursor = conn.cursor(dictionary=True)
-        
-        query = "SELECT * FROM members WHERE srno = %s"
-        cursor.execute(query, (srno,))
-        data = cursor.fetchone()
-        
-        cursor.close()
-        close_connection(conn)
-        
-        if not data:
-            raise HTTPException(status_code=404, detail="Member not found")
-        
-        return data
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in get_member_by_srno: {str(e)}")
-        close_connection(conn)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    cursor = conn.cursor(dictionary=True)
 
-@app.get("/members/name/{member_name}")
-@limiter.limit("100/minute")
-def get_members_by_name(
-    request: Request,
-    member_name: str,
-    api_key: str = Depends(verify_api_key)
-):
-    """
-    Search members by name (partial match)
-    
-    **Authentication Required**: Include X-API-Key header
-    """
-    
-    logger.info(f"GET /members/name/{member_name}")
-    
-    conn = get_database_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
-    try:
-        cursor = conn.cursor(dictionary=True)
-        
-        query = "SELECT * FROM members WHERE member_name LIKE %s"
-        cursor.execute(query, (f"%{member_name}%",))
-        data = cursor.fetchall()
-        
-        cursor.close()
-        close_connection(conn)
-        
-        return {
-            "count": len(data),
-            "data": data
-        }
-    
-    except Exception as e:
-        logger.error(f"Error in get_members_by_name: {str(e)}")
-        close_connection(conn)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    cursor.execute("SELECT * FROM members WHERE srno=%s", (srno,))
+    data = cursor.fetchone()
 
-@app.get("/members/state/{state_ut}")
-@limiter.limit("100/minute")
-def get_members_by_state(
-    request: Request,
-    state_ut: str,
-    api_key: str = Depends(verify_api_key)
-):
-    """
-    Get members by State/UT
-    
-    **Authentication Required**: Include X-API-Key header
-    """
-    
-    logger.info(f"GET /members/state/{state_ut}")
-    
-    conn = get_database_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
-    try:
-        cursor = conn.cursor(dictionary=True)
-        
-        query = "SELECT * FROM members WHERE state_ut = %s ORDER BY member_name"
-        cursor.execute(query, (state_ut,))
-        data = cursor.fetchall()
-        
-        cursor.close()
-        close_connection(conn)
-        
-        return {
-            "state_ut": state_ut,
-            "count": len(data),
-            "data": data
-        }
-    
-    except Exception as e:
-        logger.error(f"Error in get_members_by_state: {str(e)}")
-        close_connection(conn)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    cursor.close()
+    close_connection(conn)
 
-@app.get("/members/party/{party}")
-@limiter.limit("100/minute")
-def get_members_by_party(
-    request: Request,
-    party: str,
-    api_key: str = Depends(verify_api_key)
-):
-    """
-    Get members by Party
-    
-    **Authentication Required**: Include X-API-Key header
-    """
-    
-    logger.info(f"GET /members/party/{party}")
-    
-    conn = get_database_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
-    try:
-        cursor = conn.cursor(dictionary=True)
-        
-        query = "SELECT * FROM members WHERE party LIKE %s ORDER BY member_name"
-        cursor.execute(query, (f"%{party}%",))
-        data = cursor.fetchall()
-        
-        cursor.close()
-        close_connection(conn)
-        
-        return {
-            "party": party,
-            "count": len(data),
-            "data": data
-        }
-    
-    except Exception as e:
-        logger.error(f"Error in get_members_by_party: {str(e)}")
-        close_connection(conn)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    if not data:
+        raise HTTPException(404, "Member not found")
+    return data
 
-@app.get("/members/status/{status}")
-@limiter.limit("100/minute")
-def get_members_by_status(
+# =====================================================
+# GENERIC TABLE FETCHER
+# =====================================================
+def fetch_table(table: str, srno: Optional[int] = None):
+    conn = get_database_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    if srno:
+        cursor.execute(f"SELECT * FROM {table} WHERE srno=%s", (srno,))
+    else:
+        cursor.execute(f"SELECT * FROM {table}")
+
+    data = cursor.fetchall()
+    cursor.close()
+    close_connection(conn)
+    return {"count": len(data), "data": data}
+
+# =====================================================
+# OTHER TABLES
+# =====================================================
+@app.get("/assurance")
+def assurance(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("assurance", srno)
+
+@app.get("/education-levels")
+def education_levels(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("education_levels", srno)
+
+@app.get("/gallery")
+def gallery(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("gallery", srno)
+
+@app.get("/member-attendance")
+def member_attendance(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("member_attendance", srno)
+
+@app.get("/member-bills")
+def member_bills(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("member_bills", srno)
+
+@app.get("/member-committees")
+def member_committees(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("member_committees", srno)
+
+@app.get("/member-dashboard")
+def member_dashboard(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("member_dashboard", srno)
+
+@app.get("/member-debates")
+def member_debates(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("member_debates", srno)
+
+@app.get("/member-other-details")
+def member_other_details(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("member_other_details", srno)
+
+@app.get("/member-personal-details")
+def member_personal_details(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("member_personal_details", srno)
+
+@app.get("/member-questions")
+def member_questions(request: Request, srno: Optional[int] = None, api_key: str = Depends(verify_api_key)):
+    return fetch_table("member_questions", srno)
+
+@app.get("/member-special-mentions")
+def member_special_mentions(
     request: Request,
-    status: str,
+    srno: Optional[int] = None,
     api_key: str = Depends(verify_api_key)
 ):
-    """
-    Get members by Status (Active/Inactive)
-    
-    **Authentication Required**: Include X-API-Key header
-    """
-    
-    logger.info(f"GET /members/status/{status}")
-    
-    conn = get_database_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
-    try:
-        cursor = conn.cursor(dictionary=True)
-        
-        query = "SELECT * FROM members WHERE status = %s ORDER BY member_name"
-        cursor.execute(query, (status,))
-        data = cursor.fetchall()
-        
-        cursor.close()
-        close_connection(conn)
-        
-        return {
-            "status": status,
-            "count": len(data),
-            "data": data
-        }
-    
-    except Exception as e:
-        logger.error(f"Error in get_members_by_status: {str(e)}")
-        close_connection(conn)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    return fetch_table("member_special_mentions", srno)
+
+@app.get("/mp-tour")
+def mp_tour(
+    request: Request,
+    srno: Optional[int] = None,
+    api_key: str = Depends(verify_api_key)
+):
+    return fetch_table("mp_tour", srno)
+
