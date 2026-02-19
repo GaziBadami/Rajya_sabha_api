@@ -179,3 +179,24 @@ def mp_tour(
 ):
     return fetch_table("mp_tour", srno)
 
+@app.get("/proxy/image")
+def proxy_image(url: str):
+    """
+    Proxy endpoint to fetch external images (Sansad images)
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://sansad.in/"
+        }
+
+        response = requests.get(url, headers=headers, stream=True, timeout=15)
+
+        return StreamingResponse(
+            response.iter_content(chunk_size=1024),
+            media_type=response.headers.get("Content-Type", "image/jpeg")
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))    
+
