@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Query, HTTPException, Depends, Request, requests
+from fastapi import FastAPI, Query, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
-
-from fastapi.responses import StreamingResponse
+import httpx
+from fastapi.responses import StreamingResponse , Response
 from database import get_database_connection, close_connection
 from auth import verify_api_key
 from config import APP_NAME, APP_VERSION
@@ -182,23 +182,17 @@ def mp_tour(
     return fetch_table("mp_tour", srno)
 
 @app.get("/proxy/image")
-def proxy_image(url: str):
-    """
-    Proxy endpoint to fetch external images (Sansad images)
-    """
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://sansad.in/"
-        }
+async def proxy_image(url: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://sansad.in"
+    }
 
-        response = requests.get(url, headers=headers, stream=True, timeout=15)
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers)
 
-        return StreamingResponse(
-            response.iter_content(chunk_size=1024),
-            media_type=response.headers.get("Content-Type", "image/jpeg")
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))    
+    return Response(
+        content=resp.content,
+        media_type=resp.headers.get("content-type", "image/jpeg")
+    )   
 
